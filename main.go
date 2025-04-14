@@ -4,25 +4,33 @@ import (
 	"context"
 	"fmt"
 	"github.com/redis/go-redis/v9"
-
-	// "os"
-	// "strconv"
-	// "strings"
+	
+	"os"
+	"strconv"
+	"sync"
+	"math/rand/v2"
+	"time"
 )
 
 
-func createConfig(servers []string, threads uint64) []*redis.Client {
+func createConfig(servers []string, threads uint64) [][]*redis.Client {
 	i := uint64(0)
 	// each thread's server to connect to 
-	clientConnections := make([]*redis.Client , threads)
+	clientConnections := make([][]*redis.Client , threads)
 
 	for i < threads {
-		c := redis.NewClient(&redis.Options{
-			Addr:	  servers[i % uint64(len(servers))],
-			Password: "srg", 
-			DB:		  0,  
-			Protocol: 2,  
-		})
+		j := uint64(0)
+		// each server will have access to any of the servers
+		c := make([]*redis.Client, len(servers))
+		for j < uint64(len(servers)) {
+			c[j] = redis.NewClient(&redis.Options{
+				Addr:	  servers[0],
+				Password: "srg", 
+				DB:		  0,  
+				Protocol: 2,  
+			})
+			j += 1
+		}
 		clientConnections[i] = c
 		i = i + 1
 	}
@@ -32,15 +40,17 @@ func createConfig(servers []string, threads uint64) []*redis.Client {
 
 func main() {    
 	threads, _ := strconv.ParseUint(os.Args[1], 10, 64)
-	time, _ := strconv.ParseUint(os.Args[2], 10, 64)
+	t, _ := strconv.ParseUint(os.Args[2], 10, 64)
 	workload, _ := strconv.ParseUint(os.Args[3], 10, 64)
+	random, _ := strconv.ParseBool(os.Args[4])
+	fmt.Println(random)
 
 	serverAddresses := []string{"192.168.2.29:6379", "192.168.2.30:6379", "192.168.2.31:6379"} 
 	clientConnections := createConfig(serverAddresses, threads)
 
 	off_set := 5
 	lower_bound := time.Duration(off_set) * time.Second
-	upper_bound := time.Duration(uint64(off_set)+config.Time) * time.Second
+	upper_bound := time.Duration(uint64(off_set)+t) * time.Second
 
 	var l sync.Mutex
 
@@ -48,18 +58,19 @@ func main() {
 	avg_time := float64(0)
 	total_latency := time.Duration(0 * time.Microsecond)
 	ops := uint64(0)
+	switchServer := uint64(1000)
 
 	var wg sync.WaitGroup
 	var barrier sync.WaitGroup
 
-	wg.Add(len(threads))
-	barrier.Add(len(threads))
+	wg.Add(int(threads))
+	barrier.Add(int(threads))
 
 	i := uint64(0)
 	for i < threads { 
-		go func(clientId uint64, workload uint64, clientConnection *redis.Client) {
+		go func(clientId uint64, workload uint64, clientConnection []*redis.Client) error {
 			index := uint64(0)
-			serverId := i % uint64(3)
+			serverId := uint64(0)
 			var start_time time.Time
 			var end_time time.Time
 			var operation_start uint64
@@ -97,22 +108,39 @@ func main() {
 					operation_end = index
 					break
 				}
-	
-				v := str(z.Uint64())
-				sent_time := time.Now()
-				if operation == 0 {
-					err := clientConnection.Set(ctx, v, "a", 0).Err()
-					if err != nil {
-						panic(err)
-					}  
-				} else if operation == 1 {
-					val, err := clientConnection.Get(ctx, "foo").Result()
-					if err != nil {
-						panic(err)
+
+				if random {
+					if operation == uint64(0) && (index%switchServer == 0) {
+						serverId = uint64(rand.IntN(3)) 
+					} else if operation == uint64(1) {
+						serverId = uint64(0)
+					}
+				} else {
+					if operation == uint64(0) {
+						serverId = clientId % uint64(3) 
+					} else if operation == uint64(1) {
+						serverId = uint64(0)
 					}
 				}
 
-				temp = (time.Since(sent_time))
+				v := strconv.FormatUint(z.Uint64(), 10)
+				sent_time := time.Now()
+				if operation == 0 {
+					_, err := clientConnection[serverId].Get(ctx, v).Result()
+					temp = (time.Since(sent_time))
+					if err != nil {
+						// fmt.Println(err)
+						// panic(err)
+					}
+				} else if operation == 1 {
+					err := clientConnection[serverId].Set(ctx, v, clientId, 0).Err()
+					temp = (time.Since(sent_time))
+					if err != nil {
+						// fmt.Println(err)
+						// panic(err)
+					}  
+				}
+
 				latency = latency + temp 
 				index = index + 1
 			}
@@ -137,11 +165,9 @@ func main() {
 	
 	wg.Wait()
 	
-	fmt.Println("threads", config.Threads)
+	fmt.Println("threads:", threads)
 	fmt.Println("total_operations:", int(ops), "ops")
 	fmt.Println("average_time:", int(avg_time), "sec")
 	fmt.Println("throughput:", int(float64(ops)/(avg_time)), "ops/sec")
 	fmt.Println("latency:", int(float64(total_latency.Microseconds())/float64(ops)), "us")
-	
-	return nil
 }
